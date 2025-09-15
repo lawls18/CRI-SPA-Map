@@ -17,13 +17,23 @@ library(ggplate)
 # -Generating visual maps of randomization plates
 
 
-#The path to a folder containing the original plate layouts of all plates being pinned from
-origPath <- "/Users/samuelamidon/Desktop/Aim 1/Randomization/Randomization 3 From DWP/Orig_Layouts_TargetsOnly"
+
+#User inputs
+origLayoutPath <- "~/Desktop/Aim 1/Randomization/Randomization 3 From DWP/Orig_Layouts_TargetsOnly" #The path to a folder containing the original plate layouts of all plates being pinned from
+selectGenesPath <- "~/Desktop/Aim 1/Randomization/Randomization 3 From DWP/Target_Genes.xlsx" #An Excel sheet containing the names of all strains to be randomized
+wtMapPath <- "~/Desktop/Aim 1/Randomization/Randomization 3 From DWP/wt_map.xlsx" #An Excel sheet containing wild type well information
+wpmTargetPath <- "~/Desktop/Aim 1/Randomization/Randomization 3 From DWP/Randomization_Source_Files" #A target folder where WPM randomization files will be created
+pixlTargetPath <- "~/Desktop/Aim 1/Randomization/Randomization 3 From DWP/PIXL_Instruction_Files" #A target folder where PIXL instruction files will be created
+platePlot96Path <- "~/Desktop/Rand_Plate_Check.pdf" #PDF path where 96 density plate layouts figures will be generated
+platePlot384Path <- "~/Desktop/384Map.pdf" #PDF path where 384 density plate layouts figures will be generated
+plateMapName <- "Plate_Map_384_SplitByPlate.xlsx" #Excel file where plate layout maps will be stored
+plateMapPath <- "~/Desktop/Aim 1/" #Path where plate map file will be generated
+targetPlateCount <- 8 #The desired number of randomized plates
 
 
 
 #Map Combiner - combines all original plates into a single data frame
-origLayoutNames <- dir(origPath)
+origLayoutNames <- dir(origLayoutPath)
 numFiles <- length(origLayoutNames)
 origLayouts <- list()
 for (i in 1:numFiles) {
@@ -45,7 +55,7 @@ for (i in 2:numFiles) {
 
 
 #Sequence Matcher - filters out all blanks strains that won't be used
-plateReaderMap <- read_excel("/Users/samuelamidon/Desktop/Aim 1/Randomization/Randomization 3 From DWP/Target_Genes.xlsx") #An Excel sheet containing the names of all strains to be randomized
+plateReaderMap <- read_excel(selectGenesPath) 
 plateReaderMap <- plateReaderMap %>% mutate(geneIsolate = str_c(Gene,"_",Isolate))
 origSourceWells <- origLayoutsCombined %>% filter(!is.na(origLayoutsCombined$'Gene deletion'))
 origSourceWells <- origSourceWells %>% mutate(geneIsolate = str_c(origSourceWells$'Gene deletion',"_",Isolate))
@@ -54,11 +64,10 @@ origSourceWells <- origSourceWells %>% filter(origSourceWells$geneIsolate %in% p
 
 
 #Wild Type Inserter - disperses wild types among the original strains
-wtMap <- read_excel("/Users/samuelamidon/Desktop/Aim 1/Randomization/Randomization 3 From DWP/wt_map.xlsx")
+wtMap <- read_excel(wtMapPath)
 wtMap$Isolate <- as.character(wtMap$Isolate)
 wtMap <- wtMap %>% mutate(geneIsolate = str_c(wtMap$'Gene deletion',"_",Isolate))
-targetPlateCount <- 8 #Define the amount of wild types to insert
-totalWells <- targetPlateCount*96
+totalWells <- targetPlateCount*96 #Define the amount of wild types to insert
 totalStrains <- nrow(origSourceWells)
 availableWells <- totalWells - totalStrains
 wtReps <- ceiling(availableWells/nrow(wtMap))
@@ -70,7 +79,7 @@ origSourceWells<-origSourceWells[1:totalWells,]
 
 
 #Randomization Preparation - shuffles strains and creates source files for WPM randomization
-targetFolder <-"/Users/samuelamidon/Desktop/Aim 1/Randomization/Randomization 3 From DWP/Randomization_Source_Files"
+targetFolder <- wpmTargetPath
 sampVec <- sample(1:totalWells)
 origSourceWells <- origSourceWells[sampVec,] #Shuffle all plates before randomizing
 wpmPrep <- data.frame(Identifier=str_c(origSourceWells$Wells,"_",origSourceWells$Isolate,"_",origSourceWells$Plate_ID))
@@ -368,7 +377,7 @@ randArraysComp <- randArraysComp %>% mutate(Source_Col = substr(Source_Well,2,3)
 
 randArraysComp <- randArraysComp %>% mutate(Plate_Num = substr(Target_Plate,1,1))
 
-targetFolder <-"/Users/samuelamidon/Desktop/Aim 1/Randomization/Randomization 3 From DWP/PIXL_Instruction_Files"
+targetFolder <- pixlTargetPath
 plateNums <- unique(randArraysComp$Plate_Num)
 for (i in 1:length(plateNums)) {
   dat <- randArraysComp[randArraysComp$Plate_Num==plateNums[i],]
@@ -425,7 +434,7 @@ for (i in 1:length(plates)) {
     legend_n_row=27
   )
 }
-pdf("/Users/samuelamidon/Desktop/Rand_Plate_Check.pdf")
+pdf(platePlot96Path)
 for (i in 1:(length(plates)+1)) {
   print(plots[[i]])
 }
@@ -480,7 +489,7 @@ for (i in 1:length(plates)) {
     plate_type="square"
   )
 }
-pdf("/Users/samuelamidon/Desktop/384Map.pdf")
+pdf(platePlot384Path)
 for (i in 1:(length(plates)+1)) {
   print(plots[[i]])
 }
@@ -496,7 +505,7 @@ for (i in 1:nrow(rand384Map)) {
   rand384Map$PP[i] <- str_c("P",strsplit(rand384Map$Plate_ID[i],"_")[[1]][1],strsplit(rand384Map$Plate_ID[i],"_")[[1]][2],"")
 }
 
-wb <- createWorkbook("Plate_Map_384_SplitByPlate.xlsx")
+wb <- createWorkbook(plateMapName)
 plates <- unique(rand384Map$PP)
 for (i in 1:length(plates)) {
   sheetName <- str_c(plates[i],"_map")
@@ -506,4 +515,4 @@ for (i in 1:length(plates)) {
   addWorksheet(wb, sheetName)
   writeData(wb, sheet = sheetName, dat)
 }
-saveWorkbook(wb, "/Users/samuelamidon/Desktop/Aim 1/Plate_Map_384_SplitByPlate.xlsx",overwrite=TRUE)
+saveWorkbook(wb, str_c(plateMapPath, plateMapName), overwrite=TRUE)
