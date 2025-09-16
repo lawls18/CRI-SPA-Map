@@ -1,0 +1,425 @@
+# R version 4.5.1
+
+# load libraries
+library(tidyverse) ## v 2.0.0
+library(magrittr) ## v 2.0.3
+library(readxl) ## v 1.4.3
+library(growthcurver) ## v 0.3.1
+library(lme4) ## v 1.1-37
+library(lmerTest) ## v 3.1-3
+library(patchwork) ## v 1.3.0
+library(ggforce) ## v 0.4.2
+library(extrafont) ## v 0.19
+
+# user-input file paths and info
+phenData_inDir <- 'data/phen_data/'
+pheno_data_desc_inFile <- 'data/pheno_data_desc.xlsx'
+
+outDir <- 'tables/' ## directory for all analysis output files
+figDir <- 'figures/' ## directory for all figure output files
+pheno_model_data_YKOremoved_outFile <- paste0(outDir, 'pheno_model_data_YKOremoved.tsv')
+local_phenData_genos_outFile <- paste0(outDir, 'local_phenData_genos.tsv')
+distal_phenData_genos_outFile <- paste0(outDir, 'distal_phenData_genos.tsv')
+local_lmSNP_outFile <- paste0(outDir, 'local_lmSNP.tsv')
+distal_lmSNP_outFile <- paste0(outDir, 'distal_lmSNP.tsv')
+local_lmORF_outFile <- paste0(outDir, 'local_lmORF_YKOremoved.tsv')
+distal_lmORF_outFile <- paste0(outDir, 'distal_lmORF_YKOremoved.tsv')
+pval_effects_outFile <- paste0(outDir, 'orf_pvalue_effectSizes.tsv')
+snp_effects_outFile <- paste0(outDir, 'snp_pVals_effectSizes.tsv')
+val_data_outFile <- paste0(outDir, 'validation_phenotype_data.tsv')
+pheno_plots_YKOremoved_outFile <- paste0(figDir, 'pheno_boxplots_YKOremoved.pdf')
+pheno_plots_byRepairType_outFile <- paste0(figDir, 'pheno_boxplots_byRepairType.pdf')
+val_plots_outFile <- paste0(figDir, 'val_boxplots.pdf')
+MKT1_SAL1_valPlot_outFile <- paste0(figDir, 'MKT1_SAL1_YPDliq_valPlot.pdf')
+hygTest_plot_outFile <- paste0(figDir, 'hphnt_test.pdf')
+
+options(scipen = 999) ## no scientific notation
+theme_set(theme_bw(base_size = 10, base_family = 'Arial') + ## set base ggplot fonts
+             theme(text = element_text(color = 'black'), axis.text = element_text(color = 'black', size = 8)))
+
+# make output directories
+dir.create(outDir, showWarnings = FALSE)
+dir.create(figDir, showWarnings = FALSE)
+
+# load in previously-created files
+simplified_mappingVar_calls_XIVL <- read_tsv(paste0(outDir, 'CSM_chrXIVLcalls.tsv'), col_names = TRUE, show_col_types = FALSE)
+CSMorf_info <- read_tsv(paste0(outDir, 'CSM_orfInfo.tsv'), col_names = TRUE, show_col_types = FALSE)
+mappingVars_XIVL <- read_tsv(paste0(outDir, 'mappingVars_XIVL.tsv'), col_names = TRUE, show_col_types = FALSE)
+strainInfo <- read_tsv(paste0(outDir, 'strainInfo_wFilters.tsv'), col_names = TRUE, show_col_types = FALSE)
+repairTracts_summary <- read_tsv(paste0(outDir, 'repairTracts_summary.tsv'), col_names = TRUE, show_col_types = FALSE)
+repairTracts <- read_tsv(paste0(outDir, 'repairTracts.tsv'), col_names = TRUE, show_col_types = FALSE)
+
+##### PHENOTYPE DATA PROCESSING #####
+# define function to process plate reader data
+plateReaderProcessor <- function(file, file_desc){
+   
+   # load in plate description file
+   desc.df <- read_excel(file_desc, col_names = TRUE)
+   
+   # find OD table in data - must manually input 'theend' in column A of final row of OD table
+   OD_loc <- which(read_excel(file, col_names = FALSE, range = 'A1:A700') == '600')
+   OD_end <- which(read_excel(file, col_names = FALSE, range = 'A1:A700') == 'theend')
+   
+   # load in OD table - assumes 96-well plate
+   OD <- read_excel(file, col_names = TRUE, range = paste('B', OD_loc + 2,':CU', OD_end, sep=''))
+   
+   # remove extra data
+   rm(OD_loc, OD_end)
+   
+   # store OD and GFP Time for Grofit
+   OD_time <- OD$Time
+   
+   # define blanks - must contain either the word 'blank' or a 'Y' in Blank column
+   
+   if('Blank' %in% colnames(desc.df)) { 
+      # only run if Blank column exists
+      
+      contains_blank <- grep('blank', desc.df$Blank, ignore.case = TRUE)
+      contains_Y <- grep('Y', desc.df$Blank, ignore.case = TRUE)
+      
+      blank_num <- unique(c(contains_blank,contains_Y))
+      blanks <- desc.df$Wells[blank_num]
+      
+      if(identical(blanks, character(0))) {warning('Blanks not defined - Use manual entry or change desc.df')}
+      
+      rm(contains_blank, contains_Y, blank_num)
+      
+   }  else {
+      warning('Blank column not defined - please edit excel sheet')
+   }
+   
+   # define wells 
+   wells <- setdiff(desc.df$Wells, blanks) # does not include blanks in wells
+   
+   removewells <- desc.df$Wells[is.na(desc.df$Desc_1)]
+   
+   wells <- wells[!is.element(wells, removewells)]
+   
+   # make a data.frame for growthcurver
+   OD.df <- data.frame(OD[,wells])
+   
+   # time in hours
+   OD.df$time <- as.numeric((OD$Time - OD$Time[1])/60/60)
+   
+   # aggregate all blank columns into one and add them to the df
+   OD.df$blank <- rowMeans(OD[,blanks])
+   
+   # sometimes the plate did not finish the whole 24h; need to remove these time points
+   OD.df <- OD.df[sign(OD.df$time) >= 0,]
+   
+   gc_out <- SummarizeGrowthByPlate(OD.df, bg_correct = 'blank')
+   rownames(gc_out) <- gc_out$sample
+   gc_out <- gc_out[gc_out$sample != '',]
+   gc_out[gc_out$note != '', 2:9] <- NA
+   
+   #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   
+   # Baseline correct with blank data
+   
+   # Running Well = a mean of all blank wells for each time point
+   OD_avg_blankwell <- apply(OD, 1, function(x){
+      mean(as.numeric(x[blanks]))
+   })
+   
+   # Grand = avg all time points for the running well
+   grdCorr_OD <- mean(OD_avg_blankwell, na.rm = T)
+   
+   # Blank correct the data
+   
+   # grand corr
+   OD <- OD - grdCorr_OD
+   
+   # filter tables to contain only relevant wells
+   OD <- OD[,colnames(OD) %in% wells]
+   
+   #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   
+   # Output data
+   
+   # Combined desc row
+   catDesc <- apply(desc.df[3:7], 1, function(x){
+      x <- x[!is.na(x)] # remove NAs
+      x <- str_trim(x)
+      cat <- paste(x, collapse = '_') # paste together desc columns
+      return(cat)
+   })
+   
+   # Store output data
+   ratios.df <- data.frame(
+      'Wells' = desc.df$Wells,
+      catDesc,
+      'growthRate' = gc_out[desc.df$Wells, 'r'],
+      desc.df,
+      row.names=NULL)
+   
+   # final return
+   return(ratios.df)
+}
+
+# make table linking phenotyping data to appropriate description file
+hygS_pheno_data_desc <- read_excel(path = pheno_data_desc_inFile, sheet = 'hygS', col_names = TRUE)
+hygR_pheno_data_desc <- read_excel(path = pheno_data_desc_inFile, sheet = 'hygR', col_names = TRUE)
+val_pheno_data_desc <- read_excel(path = pheno_data_desc_inFile, sheet = 'val', col_names = TRUE)
+
+# process phenotyping data and merge into single table
+hygS_pheno_data_processed <- apply(hygS_pheno_data_desc, 1, function(x) {
+   data = plateReaderProcessor(file = paste0(phenData_inDir, x[1]), file_desc = paste0(phenData_inDir, x[2]))
+   data %<>% mutate(plate = str_sub(str_split_i(x[1], '_', 3), -1, -1), 
+                    plate_rep = str_split_i(x[1], '_', 4),
+                    type = 'S')
+   return(data)
+}) %>% bind_rows() %>%
+   rename(clone = 'catDesc', background = 'Desc_1', gene = 'Desc_3', isoNum = 'Desc_4') %>% ## rename columns
+   filter(is.na(Blank) & clone != '') %>%
+   mutate(isoType = str_c(gene, '_', type, isoNum), ## designate isolate with ORF, repair type, and isolate number
+          log2growthRate = log2(growthRate), ## take log2 of growth rate
+          plateName = str_c(plate, '_', plate_rep)) ## add column for plate name
+
+hygR_pheno_data_processed <- apply(hygR_pheno_data_desc, 1, function(x) {
+   data = plateReaderProcessor(file = paste0(phenData_inDir,x[1]), file_desc = paste0(phenData_inDir, x[2]))
+   data %<>% mutate(plate = str_sub(str_split_i(x[1], '_', 3), -1, -1), 
+                    plate_rep = str_split_i(x[1], '_', 4),
+                    type = 'R')
+   return(data)
+}) %>% bind_rows() %>%
+   rename(clone = 'catDesc', background = 'Desc_1', gene = 'Desc_3', isoNum = 'Desc_4') %>% ## rename columns
+   filter(is.na(Blank) & clone != '') %>%
+   mutate(gene = case_when(gene == 'YNL130W' ~ 'YNL130C', .default = gene), ## fix gene name typo
+          isoType = str_c(gene, '_', type, isoNum), ## designate isolate with ORF, repair type, and isolate number
+          log2growthRate = log2(growthRate), ## take log2 of growth rate
+          plateName = str_c(plate, '_', plate_rep)) ## add column for plate name
+
+val_pheno_data_processed <- apply(val_pheno_data_desc, 1, function(x) {
+   data = plateReaderProcessor(file = paste0(phenData_inDir, x[1]), file_desc = paste0(phenData_inDir, x[2]))
+   data %<>% mutate(plateName = str_split_i(x[1], '_', 4), 
+                    type = 'V')
+   return(data)
+}) %>% bind_rows() %>%
+   rename(clone = 'catDesc', background = 'Desc_1', gene = 'Desc_3', isoNum = 'Desc_4') %>% ## rename columns
+   filter(is.na(Blank) & clone != '') %>%
+   mutate(isoType = str_c(gene, '_', type, isoNum), ## designate isolate with ORF, repair type, and isolate number
+          log2growthRate = log2(growthRate), ## take log2 of growth rate
+          gene = case_when(gene == 'FRG7' ~ 'FRG2', gene == 'FRG8' ~ 'wt', .default = gene)) ## combine categories containing the same edits
+
+# convert gene and clone columns to factors
+hygS_pheno_data_processed %<>% mutate(gene = factor(gene, levels = c('wt', sort(unique(hygS_pheno_data_processed$gene[hygS_pheno_data_processed$gene != 'wt']), decreasing = TRUE))))
+hygR_pheno_data_processed %<>% mutate(gene = factor(gene, levels = c('wt', 'BY', sort(unique(hygR_pheno_data_processed$gene[hygR_pheno_data_processed$gene != 'wt' & hygR_pheno_data_processed$gene != 'BY']), decreasing = TRUE))))
+val_pheno_data_processed %<>% mutate(gene = factor(gene, levels = c('wt', sort(unique(val_pheno_data_processed$gene[val_pheno_data_processed$gene != 'wt']), decreasing = TRUE))))
+
+##### LIQUID PHENOTYPING #####
+# ORF model function
+orf_lm <- function(data, ref) {
+   lmResults <- bind_rows(lapply(sort(as.character(unique(data$gene[data$gene != ref]))), function(thisGene) { # loop through all genes except WT and create a dataframe of model information
+      testDat <- data %>% filter(gene %in% c(thisGene, ref)) # extract all data for gene of interest and WT isolates
+      fullModel <- lmer(log2growthRatePlateCorrected ~ gene + (1|isoType), data = testDat, REML = FALSE) # create model from corrected colony size and isolate
+      res <- c(thisGene, fixef(fullModel)[1], fixef(fullModel)[2], anova(fullModel)[1,'Pr(>F)']) # extract effects from the model
+      names(res) <- c('gene', 'geneBaseline', 'geneEffect', 'pValueGene') # name vector containing different model effects
+      return(res) # output the effects for each gene
+   }))
+   lmResults %<>% add_row(gene = ref, pValueGene = '1') # add WT row to results
+   lmResults %<>% mutate(geneBaseline = as.numeric(geneBaseline), # convert all model outputs to numerics
+                         geneEffect = as.numeric(geneEffect),
+                         pValueGene = as.numeric(pValueGene),
+                         significance = case_when( # report significance of gene effects based on model p-values
+                            (pValueGene < (0.05/(nrow(lmResults) - 1))) ~ 'Bonferroni',
+                            (pValueGene < 0.05) ~ 'Nominal',
+                            .default = 'NS'))
+   return(lmResults)
+}
+
+# SNP model function
+SNP_lm <- function(data, snps) {
+   lmResults_SNP <- bind_rows(lapply(snps, function(thisSNP) {
+      if(nrow(data %>% filter(get(thisSNP) == 'W303')) > 0) {
+         testDat <- data %>% filter((get(thisSNP) == 'W303' | get(thisSNP) == 'BY') & !is.na(get(thisSNP))) %>% select(all_of(thisSNP), 'log2growthRatePlateCorrected', 'isoType')
+         colnames(testDat) <- c('SNP', 'log2growthRatePlateCorrected', 'isoType')
+         fullModel <- lmer(log2growthRatePlateCorrected ~ SNP + (1|isoType), data = testDat, REML = FALSE)
+         res <- c(thisSNP, fixef(fullModel)[1], fixef(fullModel)[2], anova(fullModel)[1,'Pr(>F)'], nrow(data %>% filter(get(thisSNP) == 'W303')), nrow(data %>% filter(get(thisSNP) == 'BY'))) # lmer
+         names(res) <- c('SNP', 'SNPbaseline', 'SNPEffect', 'pValueSNP', 'W303_calls', 'BY_calls')
+         return(res)
+      }
+   }))
+   lmResults_SNP %<>% mutate(SNPbaseline = as.numeric(SNPbaseline), # convert all model outputs to numerics
+                             SNPEffect = as.numeric(SNPEffect),
+                             pValueSNP = as.numeric(pValueSNP),
+                             significance = case_when( # report significance of gene effects based on model p-values
+                                (pValueSNP < (0.05/nrow(lmResults_SNP))) ~ 'Bonferroni',
+                                (pValueSNP < 0.05) ~ 'Nominal',
+                                .default = 'NS'),
+                             W303_calls = as.numeric(W303_calls),
+                             BY_calls = as.numeric(BY_calls))
+   return(lmResults_SNP)
+}
+
+# function to run all ORF and SNP models
+phenLinearModels <- function(data, strainList, calls, ref, hyg, orf_info, varList) {
+   phenData = left_join(data %>% select(Wells, gene, type, isoType, plateName, growthRate, log2growthRate),
+                        strainList, by = 'isoType')
+   plateModel = lmer(log2growthRate ~ (1|gene) + (1|isoType) + (1|plateName), data = phenData) # create linear model for colony size
+   plateEffects = data.frame(ranef(plateModel)$plateName) %>% mutate(plateName = rownames(.)) # create data frame with plate names and model coefficients
+   
+   phenData = left_join(phenData, plateEffects, by = 'plateName') # add plate effects column
+   phenData %<>% rename(plateEffect = 'X.Intercept.') # rename plate effects column
+   
+   phenData %<>% mutate(log2growthRatePlateCorrected = log2growthRate - plateEffect) # add column with colony size corrected for plate effects
+   
+   if (hyg == 'R') {phenData_YKOremoved = phenData %>% filter((aux_removed == FALSE & preSeq_removed == FALSE & YKO_removed == FALSE) | gene %in% c('BY', 'wt'))} else {
+      phenData_YKOremoved = phenData %>% filter((aux_removed == FALSE & preSeq_removed == FALSE & YKO_removed == FALSE) | gene == 'wt')}
+   
+   lmORF_YKOremoved = phenData_YKOremoved %>% orf_lm(data = ., ref = ref) %>% left_join(., orf_info, join_by(gene == orf))
+   phenData_YKOremoved = inner_join(phenData_YKOremoved, lmORF_YKOremoved, by = 'gene')
+   
+   phenData_genos = inner_join(phenData, calls %>% select(!orf), join_by(corrected_isoName == strain))
+   if (hyg == 'R') {phenData_genos = phenData_genos %>% filter((aux_removed == FALSE & distal_snp_removed == FALSE & sequenced_illumina == 'yes') | gene == 'wt')} else {
+      phenData_genos = phenData_genos %>% filter((aux_removed == FALSE & local_snp_removed == FALSE & sequenced_illumina == 'yes') | gene == 'wt')}
+   
+   test_snps = colnames(calls)[which(str_detect(colnames(calls), 'var'))] 
+   
+   lmSNP = phenData_genos %>% SNP_lm(data = ., snps = test_snps)
+   lmSNP = left_join(lmSNP, varList, join_by(SNP == varID))
+   
+   return(list(phenData_all = phenData, 
+               phenData_YKOremoved = phenData_YKOremoved, 
+               phenData_genos = phenData_genos, 
+               lmORF_YKOremoved = lmORF_YKOremoved,
+               lmSNP = lmSNP
+   ))}
+
+# transpose genotype call table function
+transpose_calls <- function(simp_calls) {
+   transpose_calls = as.data.frame(cbind(colnames(simp_calls)[2:ncol(simp_calls)], t(simp_calls[,-1]))) ## transpose calls and add column for strain names
+   rownames(transpose_calls) <- NULL ## remove row names
+   colnames(transpose_calls) <- c('strain', simp_calls$varID) ## name columns with variant IDs
+   transpose_calls %<>% mutate(orf = str_split_i(strain, '_', 1)) ## indicate targeted ORF of each strain
+   transpose_calls %<>% arrange(strain) ## sort table by strain name
+   return(transpose_calls)
+}
+
+# transpose chrXIVL genotype calls
+transpose_mappingVar_calls_XIVL <- transpose_calls(simplified_mappingVar_calls_XIVL %>% select(varID, starts_with('YNL')))
+
+# manually adjust calls at sal1-1 SNP due to poor calling
+transpose_mappingVar_calls_XIVL %<>% mutate(var7523 = case_when(var7523 == 'low_qual'~ 'BY', .default = var7523)) ## change all low quality calls to BY
+transpose_mappingVar_calls_XIVL %<>% mutate(var7523 = case_when(strain %in% c('YNL083W_B8S1_4A7', 'YNL083W_B8S3_4B7', 'YNL083W_B8S4_4C7', 'YNL084C_G6S1_3G10', 'YNL084C_G6S3_3A11', 'YNL085W_C8S4_4B8', 'YNL084C_G6R1_3C11', 'YNL084C_G6R2_3D11', 'YNL085W_C8R1_4C8') ~ 'W303', .default = var7523)) ## modify isolates that targeted ORFs near SNP that were determined to be W303 by visual inspection
+transpose_mappingVar_calls_XIVL %<>% mutate(var7523 = case_when(orf %in% c('YNL005C', 'YNL008C', 'YNL035C', 'YNL054W', 'YNL055C', 'YNL056W', 'YNL067W', 'YNL070W', 'YNL071W', 'YNL073W', 'YNL074C', 'YNL076W', 'YNL077W', 'YNL078W', 'YNL079C', 'YNL081C', 'YNL082W', 'YNL083W') & str_detect(str_split_i(strain, '_', 2), 'R') ~ 'W303', .default = var7523)) ## change distal isolates with targeted ORFs centromeric to SNP to be W303
+transpose_mappingVar_calls_XIVL %<>% mutate(var7523 = case_when(!(orf %in% c('YNL005C', 'YNL008C', 'YNL035C', 'YNL054W', 'YNL055C', 'YNL056W', 'YNL067W', 'YNL070W', 'YNL071W', 'YNL073W', 'YNL074C', 'YNL076W', 'YNL077W', 'YNL078W', 'YNL079C', 'YNL081C', 'YNL082W', 'YNL083W')) & str_detect(str_split_i(strain, '_', 2), 'R') & var7523 == 'no_call' ~ 'BY', .default = var7523)) ## change distal isolates with targeted ORFs telomeric and "no_call" designations to SNP to be BY
+simplified_mappingVar_calls_XIVL[which(simplified_mappingVar_calls_XIVL$varID == 'var7523'),] <- c(simplified_mappingVar_calls_XIVL[which(simplified_mappingVar_calls_XIVL$varID == 'var7523'),1:23], transpose_mappingVar_calls_XIVL$var7523) ## apply above adjustments to simplified call table for accurate plotting
+
+hygS_models <- phenLinearModels(data = hygS_pheno_data_processed, 
+                                strainList = strainInfo, 
+                                calls = transpose_mappingVar_calls_XIVL,
+                                ref = 'wt',
+                                hyg = 'S',
+                                orf_info = CSMorf_info,
+                                varList = mappingVars_XIVL %>% select(varID, chr, pos, ref, alt))
+
+hygR_models <- phenLinearModels(data = hygR_pheno_data_processed, 
+                                strainList = strainInfo, 
+                                calls = transpose_mappingVar_calls_XIVL,
+                                ref = 'BY',
+                                hyg = 'R',
+                                orf_info = CSMorf_info,
+                                varList = mappingVars_XIVL %>% select(varID, chr, pos, ref, alt))
+
+valLinearModels <- function(data, ref) {
+   phenData = data %>% select(Wells, gene, type, isoType, plateName, growthRate, log2growthRate)
+   plateModel = lmer(log2growthRate ~ (1|gene) + (1|isoType) + (1|plateName), data = phenData) # create linear model for colony size
+   plateEffects = data.frame(ranef(plateModel)$plateName) %>% mutate(plateName = rownames(.)) # create data frame with plate names and model coefficients
+   
+   phenData = left_join(phenData, plateEffects, by = 'plateName') # add plate effects column
+   phenData %<>% rename(plateEffect = 'X.Intercept.') # rename plate effects column
+   
+   phenData %<>% mutate(log2growthRatePlateCorrected = log2growthRate - plateEffect) # add column with colony size corrected for plate effects
+   
+   lmORF = phenData %>% orf_lm(data = ., ref = ref)
+   
+   phenData = inner_join(phenData, lmORF, by = 'gene')
+   
+   return(list(phenData = phenData, 
+               lmORF = lmORF))
+}
+
+val_models <- valLinearModels(data = val_pheno_data_processed, ref = 'wt')
+val_models_W303ref <- valLinearModels(data = val_pheno_data_processed, ref = 'W303')
+val_models_FRG3ref <- valLinearModels(data = val_pheno_data_processed, ref = 'FRG3')
+
+# combine all similar models into single table
+allPhenData_YKOremoved <- bind_rows(hygS_models[['phenData_YKOremoved']], hygR_models[['phenData_YKOremoved']] %>% filter(gene != 'wt') %>% mutate(gene = case_when(gene == 'BY' ~ 'wt', .default = gene)))
+allPhenData_YKOremoved %<>% mutate(gene = factor(gene, levels = c('wt', sort(unique(allPhenData_YKOremoved$gene[allPhenData_YKOremoved$gene != 'wt']), decreasing = TRUE))),
+                                   type = factor(type, levels = c('S', 'R')))
+
+# output modeled data to TSVs
+write_tsv(allPhenData_YKOremoved %>% select(gene, type, isoType, growthRate, log2growthRate, plateName, plateEffect, log2growthRatePlateCorrected), 
+          file = pheno_model_data_YKOremoved_outFile, col_names = TRUE)
+write_tsv(hygS_models[['phenData_genos']], file = local_phenData_genos_outFile, col_names = TRUE)
+write_tsv(hygR_models[['phenData_genos']], file = distal_phenData_genos_outFile, col_names = TRUE)
+write_tsv(hygS_models[['lmSNP']], file = local_lmSNP_outFile, col_names = TRUE)
+write_tsv(hygR_models[['lmSNP']], file = distal_lmSNP_outFile, col_names = TRUE)
+write_tsv(hygS_models[['lmORF_YKOremoved']], file = local_lmORF_outFile, col_names = TRUE)
+write_tsv(hygR_models[['lmORF_YKOremoved']], file = distal_lmORF_outFile, col_names = TRUE)
+write_tsv(val_models[['phenData']], file = val_data_outFile, col_names = TRUE)
+
+##### ORF MODEL ANALYSIS #####
+all_pval_effects <- full_join(hygS_models[['phenData_YKOremoved']] %>% group_by(gene, significance) %>% 
+                                 summarize(local_YKOremoved_median = median(log2growthRatePlateCorrected, na.rm = T), local_YKOremoved_pVal = mean(pValueGene, na.rm = T)) %>% ungroup() %>% rename(local_YKOremoved_sig = significance),
+                              hygR_models[['phenData_YKOremoved']] %>% group_by(gene, significance) %>% 
+                                 summarize(distal_YKOremoved_median = median(log2growthRatePlateCorrected, na.rm = T), distal_YKOremoved_pVal = mean(pValueGene, na.rm = T)) %>% ungroup() %>% rename(distal_YKOremoved_sig = significance),
+                              by = 'gene')
+
+all_pval_effects %<>%
+   mutate(local_YKOremoved_foldChange = 2^(local_YKOremoved_median - all_pval_effects$local_YKOremoved_median[which(all_pval_effects$gene == 'wt')]),
+          distal_YKOremoved_foldChange = 2^(distal_YKOremoved_median - all_pval_effects$distal_YKOremoved_median[which(all_pval_effects$gene == 'BY')])) %>%
+   select(gene, local_YKOremoved_median, local_YKOremoved_foldChange, local_YKOremoved_pVal, local_YKOremoved_sig,
+          distal_YKOremoved_median, distal_YKOremoved_foldChange, distal_YKOremoved_pVal, distal_YKOremoved_sig)
+
+write_tsv(all_pval_effects, pval_effects_outFile, col_names = T)
+
+all_pval_effects %<>% mutate(gene = factor(gene, levels = c('wt', 'BY', sort(unique(all_pval_effects$gene[all_pval_effects$gene != 'wt' & all_pval_effects$gene != 'BY']), decreasing = TRUE))))
+
+##### SNP MODEL ANALYSIS #####
+snp_pval_effects <- full_join(hygS_models[['lmSNP']] %>% select(SNP, SNPEffect, pValueSNP, significance, W303_calls, BY_calls) %>% rename(local_SNPEffect = 'SNPEffect', local_pValueSNP = 'pValueSNP', local_significance = 'significance', local_W303_calls = 'W303_calls', local_BY_calls = 'BY_calls'), 
+                              hygR_models[['lmSNP']] %>% select(SNP, SNPEffect, pValueSNP, significance, W303_calls, BY_calls) %>% rename(distal_SNPEffect = 'SNPEffect', distal_pValueSNP = 'pValueSNP', distal_significance = 'significance', distal_W303_calls = 'W303_calls', distal_BY_calls = 'BY_calls'), 
+                              by = 'SNP') %>%
+   inner_join(., mappingVars_XIVL, join_by(SNP == varID)) %>%
+   select(SNP, chr, pos, ref, alt, local_BY_calls, local_W303_calls, local_SNPEffect, local_pValueSNP, local_significance, distal_BY_calls, distal_W303_calls, distal_SNPEffect, distal_pValueSNP, distal_significance) %>%
+   arrange(as.numeric(str_split_i(SNP, 'r', 2)))
+
+write_tsv(snp_pval_effects, snp_effects_outFile, col_names = T)
+
+#### phenotyping plots ####
+model_boxplot <- function(data, ref) {
+   strips <- data %>% group_by(gene) %>% summarise(n = n()) %>% ungroup() %>% select(gene) %>%
+      mutate(ymin = -Inf, ymax = Inf, xmin = as.numeric(gene) - 0.5, xmax = as.numeric(gene) + 0.5, fill = rep(c('a', 'b'), length.out = nrow(.))) %>%
+      pivot_longer(cols = c(ymin, ymax), values_to = 'y', names_to = 'ymin_ymax') %>% select(!ymin_ymax)
+   ggplot(data, aes(gene, log2growthRatePlateCorrected)) + #Initialize plot
+      geom_ribbon(data = strips, aes(xmin = xmin, xmax = xmax, y = y, group = gene, fill = fill), alpha = 0.4, inherit.aes = F) +
+      geom_hline(yintercept = median(unlist(data %>% filter(gene == ref) %>% select(log2growthRatePlateCorrected))), lty = 1, lwd = 0.2) + #Add median line of wt
+      geom_boxplot(aes(fill = significance), outlier.shape = NA, lwd = 0.1) +  #Add box plot
+      geom_point(aes(group = isoType), alpha = 0.5, size = 0.2, position = position_dodge(width = 0.6)) + #Add all datapoints grouping by isolate
+      geom_line(aes(group = isoType), alpha = 0.4, position = position_dodge(width = 0.6), lwd = 0.1) + #Connect isolates by lines
+      scale_fill_manual(breaks = c('Bonferroni', 'Nominal', 'NS'), labels = c('Bonferroni', 'Nominal', 'Not Significant'), values = c('Bonferroni'='#FF9999', 'Nominal'='#FFCC99', 'NS'='#E0E0E0', 'a' = 'white', 'b' = 'gray90')) + #Color code for significance
+      facet_wrap(facets = vars(type), ncol = 1) +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1), panel.grid.major.x = element_blank(), legend.position = 'bottom', legend.title = element_blank(), strip.background = element_blank(), strip.text = element_blank()) + #Adjust gene labels
+      ylab(expression(paste('Growth rate [', log[2]*'(doublings per hour)]'))) + xlab('Targeted ORF')
+}
+
+model_boxplot_noFacet <- function(data, ref) {
+   ggplot(data, aes(gene, log2growthRatePlateCorrected)) + #Initialize plot
+      geom_hline(yintercept = median(unlist(data %>% filter(gene == ref) %>% select(log2growthRatePlateCorrected))), lty = 1, lwd = 0.2) + #Add median line of wt
+      geom_boxplot(aes(fill = significance), outlier.shape = NA, lwd = 0.1) +  #Add box plot
+      geom_point(aes(group = isoType), alpha = 0.5, size = 0.2, position = position_dodge(width = 0.6)) + #Add all datapoints grouping by isolate
+      geom_line(aes(group = isoType), alpha = 0.4, position = position_dodge(width = 0.6), lwd = 0.1) + #Connect isolates by lines
+      scale_fill_manual(breaks = c('Bonferroni', 'Nominal', 'NS'), labels = c('Bonferroni', 'Nominal', 'Not Significant'), values = c('Bonferroni'='#FF9999', 'Nominal'='#FFCC99', 'NS'='#E0E0E0')) + #Color code for significance
+      theme(panel.grid.major.x = element_blank(), legend.position = 'bottom', legend.title = element_blank()) + #Adjust gene labels
+      ylab(expression(paste('Growth rate [', log[2]*'(doublings per hour)]'))) + xlab('Strain')
+}
+
+# output plot to PDF
+ggsave(file = pheno_plots_YKOremoved_outFile, plot = model_boxplot(data = allPhenData_YKOremoved, ref = 'wt'), width = 17.75, units = 'cm')
+
+##### HphNT TEST PLOT #####
+hphnt_plot <- model_boxplot_noFacet(data = hygR_models[['phenData_YKOremoved']] %>% filter(gene %in% c('wt', 'BY')) %>% mutate(gene = factor(gene, levels = c('BY', 'wt'))),
+                                    ref = 'BY') + scale_x_discrete(breaks = c('BY', 'wt'), labels = c('CRI-SPA-Map Wildtype', 'BY4742 + HphNT')) +
+   theme(axis.title.x = element_blank(), legend.position = 'none')
+
+ggsave(filename = hygTest_plot_outFile, plot = hphnt_plot, width = 8.5, height = 8.5, units = 'cm')
